@@ -12,6 +12,7 @@
 #include <chrono>
 #include <ctime>
 #include <thread>
+#include <iostream>
 
 namespace farmwise_odometry
 {
@@ -83,7 +84,18 @@ public:
      * Non-blocking. Fetch new odometry update if available.
      * @return true if a new update is available, in which case new_update gets populated.
      */
-    bool getOdometryUpdate(OdometryValue& new_update) { return odom_queue_.pop(new_update); };
+    bool getOdometryUpdate(OdometryValue& new_update) {
+        // return odom_queue_.pop(new_update);
+
+        bool ret = odom_queue_.pop(new_update);
+        std::cout << "[getOdometryUpdate] speed: " << new_update.speed 
+            << ", new_update.timestamp: " << new_update.timestamp.secs << ":" << new_update.timestamp.nsecs 
+            << ", return: " << ret
+            << ", odom_queue_ is empty: " << odom_queue_.empty()
+            << std::endl;
+
+        return ret;
+    };
 
 protected:
     /**
@@ -100,13 +112,13 @@ protected:
     virtual void processLeftEncoder(const EncoderValue& encoder_value) = 0;
     virtual void processRightEncoder(const EncoderValue& encoder_value) = 0;
 
-private:
     // Queues
     boost::lockfree::queue<EncoderValue, boost::lockfree::fixed_sized<true>>
         left_encoder_queue_, right_encoder_queue_;
     boost::lockfree::queue<OdometryValue, boost::lockfree::fixed_sized<true>>
         odom_queue_;
 
+private:
     // Threads
     std::vector<std::thread> internal_threads_;
     bool stop_threads_;
@@ -123,10 +135,14 @@ private:
             bool is_available = left_encoder_queue_.pop(left_encoder_update);
             if (is_available)
             {
+                std::cout << "[callbackLeftEncoder] pop succeed, left_encoder_queue_ is empty: " 
+                    << left_encoder_queue_.empty() << std::endl;
                 processLeftEncoder(left_encoder_update);
             }
             else
             {
+                // std::cout << "[callbackLeftEncoder] pop not succeed, left_encoder_queue_ is empty: " 
+                //    << left_encoder_queue_.empty() << std::endl;
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
@@ -165,10 +181,12 @@ private:
             bool is_available = updateOdometry(odometry_value);
             if (is_available)
             {
+                std::cout << "[callbackOdometry] updateOdometry available" << std::endl;
                 odom_queue_.push(odometry_value);
             }
             else
             {
+                std::cout << "[callbackOdometry] updateOdometry not available" << std::endl;
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
@@ -179,5 +197,21 @@ private:
  * End of supplied code
  **************/
 
+class FarmwiseOdometryWheels : public OdometryWheels
+{
+public:
+    FarmwiseOdometryWheels(int ticks_per_meter);
+    bool updateOdometry(OdometryValue& odometry_value);
+    void processLeftEncoder(const EncoderValue &encoder_value);
+    void processRightEncoder(const EncoderValue &encoder_value);
+
+private:
+    int ticks_per_meter_;                       // Ticks per meter calibration for the wheels
+    int64_t last_left_tick_, last_right_tick_;  // Last tick values for the left and right wheels
+    std::chrono::steady_clock::time_point last_left_update_, last_right_update_;  // Last update times for the left and right wheels
+    float left_speed_, right_speed_;            // Speeds of the left and right wheels
+    std::mutex mutex_;                          // Mutex for thread safety
+    std::chrono::steady_clock::time_point last_update_;  // Last update time for the odometry value
+};
 }  // namespace farmwise_odometry
 

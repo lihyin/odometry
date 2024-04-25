@@ -2,109 +2,137 @@
 
 namespace farmwise_odometry
 {
-
-
-class FarmwiseOdometryWheels : public OdometryWheels
+FarmwiseOdometryWheels::FarmwiseOdometryWheels(int ticks_per_meter)
+    : OdometryWheels(1000, 1), 
+        ticks_per_meter_(ticks_per_meter), 
+        last_left_tick_(0), last_right_tick_(0),
+        last_left_update_(std::chrono::steady_clock::time_point::min()), 
+        last_right_update_(std::chrono::steady_clock::time_point::min()), 
+        last_update_(std::chrono::steady_clock::time_point::min()), 
+        left_speed_(0), right_speed_(0)
 {
-public:
-    FarmwiseOdometryWheels(int ticks_per_meter)
-        : OdometryWheels(1000, 1000), ticks_per_meter_(ticks_per_meter), last_left_tick_(0), last_right_tick_(0),
-          last_left_update_(0), last_right_update_(0), left_speed_(0), right_speed_(0)
-    {
+}
+
+bool FarmwiseOdometryWheels::updateOdometry(OdometryValue& odometry_value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // if (left_encoder_queue_.empty() && right_encoder_queue_.empty()) {
+    //     return false;
+    // }
+
+    // If it's the first read for either left or right
+    // TODO: use a special value for initial speed state instead of 0
+    if (left_speed_ == 0 || right_speed_ == 0) {  
+        return false;
     }
 
-    bool updateOdometry(OdometryValue& odometry_value) override
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
+    // Calculate the average speed of the left and right wheels
+    float speed = (left_speed_ + right_speed_) / 2.0;
 
-        // Calculate the elapsed time since the last update
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_update_).count();
-        if (elapsed == 0)
-        {
-            return false; // Not enough time has elapsed
-        }
-        last_update_ = now;
+    // Update the odometry value
+    odometry_value.speed = speed;
+    last_update_ = last_left_update_ > last_right_update_ ? last_left_update_ : last_right_update_;
 
-        // Calculate the average speed of the left and right wheels
-        float speed = (left_speed_ + right_speed_) / 2.0;
+    odometry_value.timestamp.secs = 
+        std::chrono::duration_cast<std::chrono::seconds>(last_update_.time_since_epoch()).count();
+    odometry_value.timestamp.nsecs = 
+        std::chrono::nanoseconds(last_update_.time_since_epoch()).count() % 1000000000;
 
-        // Calculate the distance traveled by the center of the wheels
-        float distance = speed * elapsed;
+    
+    OdometryValue t;
+    odom_queue_.pop(t);
 
-        // Update the odometry value
-        odometry_value.speed = speed;
-        odometry_value.timestamp.secs = std::chrono::seconds(now.time_since_epoch()).count();
-        odometry_value.timestamp.nsecs = std::chrono::nanoseconds(now.time_since_epoch()).count() % 1000000000;
+    std::cout << "[updateOdometry] odometry_value.speed: " << odometry_value.speed 
+        << ", odometry_value.timestamp: " << odometry_value.timestamp.secs << ":" << odometry_value.timestamp.nsecs
+        << std::endl;
 
-        return true;
-    }
+    return true;
+}
 
-    void processLeftEncoder(const EncoderValue& encoder_value) override
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
+void FarmwiseOdometryWheels::processLeftEncoder(const EncoderValue& encoder_value) {
+    std::lock_guard<std::mutex> lock(mutex_);
 
-        // Calculate the tick difference
-        int64_t tick_diff = encoder_value.tick - last_left_tick_;
+    std::chrono::steady_clock::time_point current_time = std::chrono::steady_clock::time_point() 
+            + std::chrono::seconds(encoder_value.timestamp.secs) 
+            + std::chrono::nanoseconds(encoder_value.timestamp.nsecs);
 
-        // Calculate the time difference since the last update
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_left_update_).count();
-
-        // Check for overflow/underflow of the encoder tick
-        if (tick_diff > EncoderValue::max_tick / 2)
-        {
-            tick_diff -= EncoderValue::max_tick + 1;
-        }
-        else if (tick_diff < (-EncoderValue::max_tick / 2))
-        {
-            tick_diff += EncoderValue::max_tick + 1;
-        }
-
-        // Calculate the speed of the left wheel
-        left_speed_ = static_cast<float>(tick_diff) / (ticks_per_meter_ * elapsed);
-
-        // Update the last tick and update time
+    // If it's the first read
+    if (last_left_update_ == std::chrono::steady_clock::time_point::min()) {
         last_left_tick_ = encoder_value.tick;
-        last_left_update_ = now;
+        last_left_update_ = current_time;
+
+        return;
     }
 
-    void processRightEncoder(const EncoderValue& encoder_value) override
+    // Calculate the tick difference
+    int64_t tick_diff = encoder_value.tick - last_left_tick_;
+
+    // Calculate the time difference since the last update
+    auto elapsed = 
+        std::chrono::duration_cast<std::chrono::seconds>(current_time - last_left_update_).count();
+
+    // Check for overflow/underflow of the encoder tick
+    if (tick_diff > EncoderValue::max_tick / 2)
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        // Calculate the tick difference
-        int64_t tick_diff = encoder_value.tick - last_right_tick_;
-
-        // Calculate the time difference since the last update
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_right_update_).count();
-
-        // Check for overflow/underflow of the encoder tick
-        if (tick_diff > EncoderValue::max_tick / 2)
-        {
-            tick_diff -= EncoderValue::max_tick + 1;
-        }
-        else if (tick_diff < (-EncoderValue::max_tick / 2))
-        {
-            tick_diff += EncoderValue::max_tick + 1;
-        }
-
-        // Calculate the speed of the right wheel
-        right_speed_ = static_cast<float>(tick_diff) / (ticks_per_meter_ * elapsed);
-
-        // Update the last tick and update time
-        last_right_tick_ = encoder_value.tick;
-        last_right_update_ = now;
+        tick_diff -= EncoderValue::max_tick + 1;
+    }
+    else if (tick_diff < (-EncoderValue::max_tick / 2))
+    {
+        tick_diff += EncoderValue::max_tick + 1;
     }
 
-private:
-    int ticks_per_meter_;                       // Ticks per meter calibration for the wheels
-    int64_t last_left_tick_, last_right_tick_;  // Last tick values for the left and right wheels
-    std::chrono::steady_clock::time_point last_left_update_, last_right_update_;  // Last update times for the left and right wheels
-    float left_speed_, right_speed_;            // Speeds of the left and right wheels
-    std::mutex mutex_;                          // Mutex for thread safety
-    std::chrono::steady_clock::time_point last_update_;  // Last update time for the odometry value
+    // Calculate the speed of the left wheel
+    left_speed_ = static_cast<float>(tick_diff) / (ticks_per_meter_ * elapsed);
+
+    // Update the last tick and update time
+    last_left_tick_ = encoder_value.tick;
+    last_left_update_ = current_time;
+
+    std::cout << "[processLeftEncoder] left_speed_: " << left_speed_
+        << ", encoder_value.tick: " << encoder_value.tick
+        << ", elapsed: " << elapsed
+        << std::endl;
+}
+
+void FarmwiseOdometryWheels::processRightEncoder(const EncoderValue& encoder_value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    std::chrono::steady_clock::time_point current_time = 
+        std::chrono::steady_clock::time_point() 
+        + std::chrono::seconds(encoder_value.timestamp.secs) 
+        + std::chrono::nanoseconds(encoder_value.timestamp.nsecs);
+
+    // If it's the first read
+    if (last_right_update_ == std::chrono::steady_clock::time_point::min()) {
+        last_right_tick_ = encoder_value.tick;
+        last_right_update_ = current_time;
+
+        return;
+    }
+
+    // Calculate the tick difference
+    int64_t tick_diff = encoder_value.tick - last_right_tick_;
+
+    // Calculate the time difference since the last update
+    auto elapsed = 
+        std::chrono::duration_cast<std::chrono::seconds>(current_time - last_right_update_).count();
+
+    // Check for overflow/underflow of the encoder tick
+    if (tick_diff > EncoderValue::max_tick / 2)
+    {
+        tick_diff -= EncoderValue::max_tick + 1;
+    }
+    else if (tick_diff < (-EncoderValue::max_tick / 2))
+    {
+        tick_diff += EncoderValue::max_tick + 1;
+    }
+
+    // Calculate the speed of the right wheel
+    right_speed_ = static_cast<float>(tick_diff) / (ticks_per_meter_ * elapsed);
+
+    // Update the last tick and update time
+    last_right_tick_ = encoder_value.tick;
+    last_right_update_ = current_time;
 };
 
 }  // namespace farmwise_odometry

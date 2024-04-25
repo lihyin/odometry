@@ -24,8 +24,8 @@ include_directories(
 )
 
 add_executable(test_drive_straight
-  src/test_drive_straight.cpp
   src/odometry_wheels.cpp
+  src/test_drive_straight.cpp
 )
 
 target_link_libraries(test_drive_straight
